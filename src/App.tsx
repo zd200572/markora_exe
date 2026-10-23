@@ -241,7 +241,8 @@ function App() {
       setActiveId(existing.id)
     } else {
       const note = noteFromFile(opened.path, opened.title, opened.contents)
-      const next = [...current, note]
+      const isOnlyUntouchedWelcome = current.length === 1 && current[0].id === 'welcome' && !isFileDirty(current[0])
+      const next = isOnlyUntouchedWelcome ? [note] : [...current, note]
       notesRef.current = next
       setNotes(next)
       setActiveId(note.id)

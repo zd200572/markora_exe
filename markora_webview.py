@@ -6,6 +6,8 @@ native window (Edge/WebView2 via pywebview). Packaged with PyInstaller.
 
 from __future__ import annotations
 
+import atexit
+import json
 import os
 import socket
 import sys
@@ -18,6 +20,24 @@ import webview
 # Theme colour shared by the app chrome and the splash, so window creation
 # does not flash white before the page paints.
 BG = "#f7f5f2"
+INSTANCE_PORT_FILE = os.path.join(tempfile.gettempdir(), "markora_instance.port")
+
+
+def _read_file_text(path: str) -> str | None:
+    encodings = ("utf-8-sig", "utf-8", "gb18030", "gbk", "utf-16", "latin-1")
+    for enc in encodings:
+        try:
+            with open(path, "r", encoding=enc) as f:
+                return f.read()
+        except (UnicodeDecodeError, LookupError):
+            continue
+        except Exception:
+            return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception:
+        return None
 
 
 def resolve_dist() -> str:
@@ -53,6 +73,76 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+def startup_document_path(argv: list[str]) -> str | None:
+    """First existing file passed on the command line (e.g. via Windows "Open with")."""
+    for arg in argv:
+        if not arg or arg.startswith("-"):
+            continue
+        candidate = arg.strip().strip('"').strip("'")
+        if candidate and os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return None
+
+
+def try_send_to_running_instance(file_path: str | None) -> bool:
+    """If another Markora instance is running, notify it to open file_path (or focus) and return True."""
+    if not os.path.isfile(INSTANCE_PORT_FILE):
+        return False
+    try:
+        with open(INSTANCE_PORT_FILE, "r", encoding="ascii") as f:
+            port = int(f.read().strip())
+    except Exception:
+        return False
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.8)
+            s.connect(("127.0.0.1", port))
+            msg = json.dumps({"action": "open", "path": file_path}) + "\n"
+            s.sendall(msg.encode("utf-8"))
+            resp = s.recv(1024)
+            if resp.strip() == b"OK":
+                return True
+    except Exception:
+        try:
+            os.remove(INSTANCE_PORT_FILE)
+        except Exception:
+            pass
+        return False
+    return False
+
+
+def start_ipc_server(on_open_file) -> int:
+    """Start local socket server to listen for commands from second instances."""
+    ipc_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ipc_sock.bind(("127.0.0.1", 0))
+    ipc_sock.listen(5)
+    port = ipc_sock.getsockname()[1]
+
+    def loop():
+        while True:
+            try:
+                conn, _ = ipc_sock.accept()
+                with conn:
+                    conn.settimeout(2.0)
+                    data = b""
+                    while not data.endswith(b"\n") and len(data) < 65536:
+                        chunk = conn.recv(1024)
+                        if not chunk:
+                            break
+                        data += chunk
+                    if data:
+                        req = json.loads(data.decode("utf-8").strip())
+                        if req.get("action") == "open":
+                            conn.sendall(b"OK\n")
+                            on_open_file(req.get("path"))
+            except Exception:
+                continue
+
+    threading.Thread(target=loop, daemon=True).start()
+    return port
+
+
 def serve(dist: str) -> tuple[socketserver.TCPServer, int]:
     port = free_port()
     handler = type("BoundHandler", (Handler,), {"directory": dist})
@@ -67,6 +157,7 @@ class DesktopAPI:
 
     def __init__(self):
         self._window = None
+        self._pending_document: str | None = None
 
     def _get_window(self):
         return self._window or webview.active_window()
@@ -112,12 +203,29 @@ class DesktopAPI:
             if not res:
                 return None
             path = res if isinstance(res, str) else res[0]
-            with open(path, "r", encoding="utf-8") as f:
-                contents = f.read()
+            contents = _read_file_text(path)
+            if contents is None:
+                return None
             title = os.path.splitext(os.path.basename(path))[0]
             return {"path": path, "title": title, "contents": contents}
-        except Exception as e:
+        except Exception:
             return None
+
+    def take_startup_document(self):
+        """Document requested on the command line, consumed on first read."""
+        path = self._pending_document
+        self._pending_document = None
+        if not path:
+            return None
+        contents = _read_file_text(path)
+        if contents is None:
+            return None
+        title = os.path.splitext(os.path.basename(path))[0]
+        return {"path": path, "title": title, "contents": contents}
+
+    def read_markdown_file(self, path: str):
+        """Contents of the given file, or None if it cannot be read."""
+        return _read_file_text(path)
 
     def save_markdown(self, path: str | None, suggested_name: str, contents: str):
         try:
@@ -141,11 +249,56 @@ class DesktopAPI:
 
 
 def main() -> int:
+    target_file = startup_document_path(sys.argv[1:])
+
+    # If an instance is already running, pass the file to it and exit immediately
+    if try_send_to_running_instance(target_file):
+        return 0
+
     dist = resolve_dist()
     _httpd, port = serve(dist)
     url = f"http://127.0.0.1:{port}/index.html?mode=desktop"
 
     api = DesktopAPI()
+    api._pending_document = target_file
+
+    def handle_external_open(path: str | None):
+        try:
+            if api._window:
+                api._window.restore()
+                api._window.show()
+        except Exception:
+            pass
+        if not path or not os.path.isfile(path):
+            return
+        contents = _read_file_text(path)
+        if contents is None:
+            return
+        title = os.path.splitext(os.path.basename(path))[0]
+        doc = {"path": path, "title": title, "contents": contents}
+        try:
+            if api._window:
+                js = f"window.__markoraOpenFile && window.__markoraOpenFile({json.dumps(doc)});"
+                api._window.evaluate_js(js)
+        except Exception:
+            pass
+
+    ipc_port = start_ipc_server(handle_external_open)
+    try:
+        with open(INSTANCE_PORT_FILE, "w", encoding="ascii") as f:
+            f.write(str(ipc_port))
+    except Exception:
+        pass
+
+    def cleanup():
+        try:
+            if os.path.isfile(INSTANCE_PORT_FILE):
+                os.remove(INSTANCE_PORT_FILE)
+        except Exception:
+            pass
+
+    atexit.register(cleanup)
+
     window = webview.create_window(
         "Markora",
         url,
@@ -160,7 +313,12 @@ def main() -> int:
     )
     api._window = window
     webview.start(debug=False)
+    cleanup()
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 if __name__ == "__main__":

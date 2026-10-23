@@ -124,12 +124,71 @@ export async function openExportInBrowser(title: string, contents: string): Prom
   }
 }
 
+function whenPyWebViewReady(timeoutMs = 5000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const check = () => {
+      const w = window as any
+      return Boolean(w.pywebview?.api?.take_startup_document)
+    }
+    if (check()) {
+      resolve(true)
+      return
+    }
+    const timer = window.setTimeout(() => {
+      window.clearInterval(interval)
+      resolve(check())
+    }, timeoutMs)
+
+    const interval = window.setInterval(() => {
+      if (check()) {
+        window.clearInterval(interval)
+        window.clearTimeout(timer)
+        resolve(true)
+      }
+    }, 30)
+
+    window.addEventListener('pywebviewready', () => {
+      if (check()) {
+        window.clearInterval(interval)
+        window.clearTimeout(timer)
+        resolve(true)
+      }
+    }, { once: true })
+  })
+}
+
+// Memoized so a remount (e.g. React StrictMode double-mount) shares one call:
+// the Python-side startup document is consumed on first read.
+let startupDocumentsPromise: Promise<OpenedDocument[]> | null = null
+
 export async function takeStartupDocuments(): Promise<OpenedDocument[]> {
-  if (!isTauri()) return []
-  return invoke<OpenedDocument[]>('take_pending_documents')
+  if (isTauri()) {
+    return invoke<OpenedDocument[]>('take_pending_documents')
+  }
+  if (isDesktop()) {
+    startupDocumentsPromise ??= (async () => {
+      await whenPyWebViewReady()
+      const w = window as any
+      const doc = await w.pywebview?.api?.take_startup_document?.()
+      return doc ? [doc] : []
+    })()
+    return startupDocumentsPromise
+  }
+  return []
 }
 
 export async function onNativeDocumentOpened(handler: (document: OpenedDocument) => void): Promise<UnlistenFn> {
+  if (isDesktop() && !isTauri()) {
+    const fn = (doc: OpenedDocument) => {
+      if (doc && doc.path) handler(doc)
+    }
+    ;(window as any).__markoraOpenFile = fn
+    return () => {
+      if ((window as any).__markoraOpenFile === fn) {
+        delete (window as any).__markoraOpenFile
+      }
+    }
+  }
   if (!isTauri()) return () => {}
   return listen<OpenedDocument>('open-document', (event) => handler(event.payload))
 }
@@ -163,8 +222,14 @@ export async function readNativeWorkspaceDocument(path: string): Promise<OpenedD
 }
 
 export async function readExternalDocument(path: string): Promise<string> {
-  if (!isTauri()) throw new Error('Not in desktop environment')
-  return invoke<string>('read_external_document', { path })
+  const pywebview = (window as any).pywebview
+  if (pywebview?.api?.read_markdown_file) {
+    const contents = await pywebview.api.read_markdown_file(path)
+    if (typeof contents !== 'string') throw new Error(`Cannot read ${path}`)
+    return contents
+  }
+  if (isTauri()) return invoke<string>('read_external_document', { path })
+  throw new Error('Not in desktop environment')
 }
 
 export async function onMenuAction(handler: (id: string) => void): Promise<UnlistenFn> {
