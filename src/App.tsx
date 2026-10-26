@@ -195,13 +195,21 @@ function App() {
   useEffect(() => {
     if (!isEditorUsable(editor)) return
     let isMouseDown = false
+    let lastActiveBlock: Element | null = null
     let scrollTimer: number | null = null
 
-    const onMouseDown = () => { isMouseDown = true }
+    const onMouseDown = () => {
+      isMouseDown = true
+    }
+
     const onMouseUp = () => {
       isMouseDown = false
-      syncActiveBlock()
+      // Only sync if selection is collapsed (not dragging a range)
+      if (editor.state.selection.empty) {
+        syncActiveBlock()
+      }
     }
+
     const dom = editor.view.dom
     dom.addEventListener('mousedown', onMouseDown)
     window.addEventListener('mouseup', onMouseUp)
@@ -209,9 +217,12 @@ function App() {
     function syncActiveBlock() {
       if (!isEditorUsable(editor)) return
 
-      const selection = editor.state.selection
-      const isSelectingRange = !selection.empty
+      // Freeze during mouse drag or non-empty selection range
+      if (isMouseDown || !editor.state.selection.empty) {
+        return
+      }
 
+      const selection = editor.state.selection
       let block: Element | null = null
       try {
         const targetDom = editor.view.domAtPos(selection.anchor).node
@@ -221,13 +232,18 @@ function App() {
         return
       }
 
-      const currentActive = editor.view.dom.querySelector('.active-block')
-      if (currentActive !== block) {
-        if (currentActive) currentActive.classList.remove('active-block')
-        block?.classList.add('active-block')
+      // Update class ONLY when block actually changes
+      if (block !== lastActiveBlock) {
+        if (lastActiveBlock && lastActiveBlock.isConnected) {
+          lastActiveBlock.classList.remove('active-block')
+        }
+        if (block) {
+          block.classList.add('active-block')
+        }
+        lastActiveBlock = block
       }
 
-      if (typewriterMode && !isMouseDown && !isSelectingRange && block) {
+      if (typewriterMode && block) {
         if (scrollTimer !== null) window.clearTimeout(scrollTimer)
         scrollTimer = window.setTimeout(() => {
           block?.scrollIntoView({ block: 'center', behavior: 'smooth' })
@@ -238,12 +254,16 @@ function App() {
     editor.on('selectionUpdate', syncActiveBlock)
     editor.on('update', syncActiveBlock)
     syncActiveBlock()
+
     return () => {
       if (scrollTimer !== null) window.clearTimeout(scrollTimer)
       dom.removeEventListener('mousedown', onMouseDown)
       window.removeEventListener('mouseup', onMouseUp)
       editor.off('selectionUpdate', syncActiveBlock)
       editor.off('update', syncActiveBlock)
+      if (lastActiveBlock && lastActiveBlock.isConnected) {
+        lastActiveBlock.classList.remove('active-block')
+      }
     }
   }, [editor, typewriterMode])
 

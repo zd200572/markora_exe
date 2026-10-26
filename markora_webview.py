@@ -249,6 +249,11 @@ class DesktopAPI:
 
 
 def main() -> int:
+    if "--disable-gpu" in sys.argv:
+        current_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+        if "--disable-gpu" not in current_args:
+            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (current_args + " --disable-gpu").strip()
+
     target_file = startup_document_path(sys.argv[1:])
 
     # If an instance is already running, pass the file to it and exit immediately

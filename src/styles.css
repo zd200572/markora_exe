@@ -1,12 +1,11 @@
 /* Markora — Typora-inspired clean design system */
 
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Noto+Serif+SC:wght@400;500;600;700&display=swap');
-@import url('https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css');
-@import url('https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/styles/github-dark.min.css');
+@import 'katex/dist/katex.min.css';
+@import 'highlight.js/styles/github-dark.min.css';
 
 /* ───────── Design tokens ───────── */
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
   font-synthesis: none;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -34,7 +33,7 @@
   --radius-md: 6px;
  --radius-lg: 8px;
  --transition: 0.18s ease;
- --editor-font-family: 'Noto Serif SC', Georgia, serif;
+ --editor-font-family: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'SimSun', 'STSong', Georgia, serif;
  --editor-font-size: 16px;
  --editor-line-height: 1.85;
   --editor-letter-spacing: normal;
