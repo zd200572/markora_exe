@@ -369,12 +369,15 @@ def main() -> int:
     api._window = window
 
     def on_closing():
-        try:
-            s = window.evaluate_js("window.__getDraft && window.__getDraft()")
-            if s:
-                api.save_draft(s)
-        except Exception:
-            pass
+        def flush_draft():
+            try:
+                s = window.evaluate_js("window.__getDraft && window.__getDraft()")
+                if s:
+                    api.save_draft(s)
+            except Exception:
+                pass
+
+        threading.Thread(target=flush_draft, daemon=True).start()
 
     window.events.closing += on_closing
     os.makedirs(WEBVIEW_STORAGE_DIR, exist_ok=True)

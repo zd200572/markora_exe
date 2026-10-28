@@ -127,11 +127,15 @@ function App() {
 
   useEffect(() => {
     const interval = window.setInterval(() => { void doSave() }, AUTOSAVE_INTERVAL)
-    const onBlur = () => { void doSave() }
-    window.addEventListener('blur', onBlur)
+    const flush = () => { void doSave() }
+    window.addEventListener('blur', flush)
+    window.addEventListener('beforeunload', flush)
+    window.addEventListener('pagehide', flush)
     return () => {
       window.clearInterval(interval)
-      window.removeEventListener('blur', onBlur)
+      window.removeEventListener('blur', flush)
+      window.removeEventListener('beforeunload', flush)
+      window.removeEventListener('pagehide', flush)
     }
   }, [doSave])
 
