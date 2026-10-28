@@ -21,6 +21,11 @@ import webview
 # does not flash white before the page paints.
 BG = "#f7f5f2"
 INSTANCE_PORT_FILE = os.path.join(tempfile.gettempdir(), "markora_instance.port")
+APPDATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Markora")
+os.makedirs(APPDATA_DIR, exist_ok=True)
+DRAFT_FILE = os.path.join(APPDATA_DIR, "draft.json")
+WEBVIEW_STORAGE_DIR = os.path.join(APPDATA_DIR, "webview")
+APP_PORT = 18742
 
 
 def _read_file_text(path: str) -> str | None:
@@ -144,10 +149,14 @@ def start_ipc_server(on_open_file) -> int:
 
 
 def serve(dist: str) -> tuple[socketserver.TCPServer, int]:
-    port = free_port()
     handler = type("BoundHandler", (Handler,), {"directory": dist})
     socketserver.TCPServer.allow_reuse_address = True
-    httpd = socketserver.TCPServer(("127.0.0.1", port), handler)
+    try:
+        port = APP_PORT
+        httpd = socketserver.TCPServer(("127.0.0.1", port), handler)
+    except OSError:
+        port = free_port()
+        httpd = socketserver.TCPServer(("127.0.0.1", port), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, port
 
@@ -161,6 +170,47 @@ class DesktopAPI:
 
     def _get_window(self):
         return self._window or webview.active_window()
+
+    def save_draft(self, data):
+        temp_path = None
+        try:
+            draft = json.loads(data) if isinstance(data, str) else data
+            if not isinstance(draft, dict):
+                return False
+            os.makedirs(APPDATA_DIR, exist_ok=True)
+            fd, temp_path = tempfile.mkstemp(prefix="draft-", suffix=".tmp", dir=APPDATA_DIR)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(draft, f, ensure_ascii=False)
+            os.replace(temp_path, DRAFT_FILE)
+            return True
+        except Exception:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+            return False
+
+    def load_draft(self):
+        if not os.path.exists(DRAFT_FILE):
+            return None
+        try:
+            with open(DRAFT_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            try:
+                os.replace(DRAFT_FILE, DRAFT_FILE + ".bad")
+            except Exception:
+                pass
+            return None
+
+    def clear_draft(self):
+        try:
+            if os.path.exists(DRAFT_FILE):
+                os.remove(DRAFT_FILE)
+            return True
+        except Exception:
+            return False
 
     def export_html_file(self, suggested_name: str, contents: str):
         try:
@@ -317,13 +367,20 @@ def main() -> int:
         zoomable=True,
     )
     api._window = window
-    webview.start(debug=False)
+
+    def on_closing():
+        try:
+            s = window.evaluate_js("window.__getDraft && window.__getDraft()")
+            if s:
+                api.save_draft(s)
+        except Exception:
+            pass
+
+    window.events.closing += on_closing
+    os.makedirs(WEBVIEW_STORAGE_DIR, exist_ok=True)
+    webview.start(debug=False, private_mode=False, storage_path=WEBVIEW_STORAGE_DIR)
     cleanup()
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
 
 
 if __name__ == "__main__":

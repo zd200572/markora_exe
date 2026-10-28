@@ -8,7 +8,7 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildFileTree, classifyExternalChange, createNote, displayDate, flattenTree, getOutline, getWordCount, isFileDirty, noteFromFile, titleFromPath, type Note, WELCOME_NOTE } from './model'
-import { exportHtmlFile, isDesktop, onMenuAction, onNativeCloseRequested, onNativeDocumentOpened, onToast, openNativeDocument, openNativeWorkspace, openExportInBrowser, quitNativeApp, readExternalDocument, readNativeWorkspaceDocument, refreshNativeWorkspace, revealNativeDocument, saveNativeDocument, startWindowDrag, syncThemeMenu, takeStartupDocuments, type OpenedDocument, type Workspace } from './native'
+import { clearNativeDraft, exportHtmlFile, isDesktop, loadNativeDraft, onMenuAction, onNativeCloseRequested, onNativeDocumentOpened, onToast, openNativeDocument, openNativeWorkspace, openExportInBrowser, quitNativeApp, readExternalDocument, readNativeWorkspaceDocument, refreshNativeWorkspace, revealNativeDocument, saveNativeDocument, saveNativeDraft, startWindowDrag, syncThemeMenu, takeStartupDocuments, type OpenedDocument, type Workspace } from './native'
 import { createEditorExtensions, getEditorOutline, isEditorUsable } from './editor'
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -30,6 +30,8 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 
 const STORAGE_KEY = 'typedown.documents.v1'
 const ACTIVE_KEY = 'typedown.active.v1'
+const AUTOSAVE_DELAY = 1500
+const AUTOSAVE_INTERVAL = 30000
 function loadNotes(): Note[] {
   try {
     const value = localStorage.getItem(STORAGE_KEY)
@@ -75,9 +77,94 @@ function App() {
   const editorRef = useRef<ReturnType<typeof useEditor> | null>(null)
   const active = notes.find((note) => note.id === activeId) ?? notes[0]
   const notesRef = useRef(notes)
+  const activeRef = useRef(active)
+  const sourceModeRef = useRef(sourceMode)
   const menuHandlerRef = useRef<(id: string) => void>(() => {})
+  const lastSavedRef = useRef<string>('')
+  const saveTimerRef = useRef<number | null>(null)
 
   useEffect(() => { notesRef.current = notes }, [notes])
+  useEffect(() => { activeRef.current = active }, [active])
+  useEffect(() => { sourceModeRef.current = sourceMode }, [sourceMode])
+
+  const snapshot = useCallback(() => {
+    let content = activeRef.current?.markdown ?? ''
+    if (!sourceModeRef.current && isEditorUsable(editorRef.current)) {
+      try {
+        content = editorRef.current.getMarkdown()
+      } catch {}
+    }
+    return {
+      content,
+      path: activeRef.current?.filePath ?? null,
+      ts: Date.now(),
+    }
+  }, [])
+
+  const doSave = useCallback(async () => {
+    const s = snapshot()
+    if (!s.content || s.content === lastSavedRef.current) return
+    try {
+      const ok = await saveNativeDraft(s)
+      if (ok) {
+        lastSavedRef.current = s.content
+        setSaved(true)
+      }
+    } catch (e) {
+      console.error('autosave failed', e)
+    }
+  }, [snapshot])
+
+  const scheduleSave = useCallback(() => {
+    setSaved(false)
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current)
+    }
+    saveTimerRef.current = window.setTimeout(() => {
+      void doSave()
+    }, AUTOSAVE_DELAY)
+  }, [doSave])
+
+  useEffect(() => {
+    const interval = window.setInterval(() => { void doSave() }, AUTOSAVE_INTERVAL)
+    const onBlur = () => { void doSave() }
+    window.addEventListener('blur', onBlur)
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener('blur', onBlur)
+    }
+  }, [doSave])
+
+  useEffect(() => {
+    ;(window as any).__getDraft = () => snapshot()
+    return () => {
+      delete (window as any).__getDraft
+    }
+  }, [snapshot])
+
+  useEffect(() => {
+    let mounted = true
+    void loadNativeDraft().then((d) => {
+      if (!mounted || !d || typeof d.content !== 'string' || !d.content) return
+      lastSavedRef.current = d.content
+      setNotes((currentNotes) => {
+        const current = currentNotes.find((n) => n.id === activeId) ?? currentNotes[0]
+        if (current?.filePath && current.filePath !== d.path) {
+          return currentNotes
+        }
+        const updatedNote: Note = {
+          ...current,
+          title: d.path ? titleFromPath(d.path) : (current?.title || '未命名文稿'),
+          markdown: d.content,
+          filePath: d.path || undefined,
+          updatedAt: d.ts || Date.now(),
+        }
+        return currentNotes.map((n) => n.id === updatedNote.id ? updatedNote : n)
+      })
+      setMessage('已恢复上次未保存的内容')
+    })
+    return () => { mounted = false }
+  }, [])
 
   const [quickOpen, setQuickOpen] = useState(false)
   const [quickOpenQuery, setQuickOpenQuery] = useState('')
@@ -133,7 +220,8 @@ function App() {
     setNotes((current) => current.map((note) => note.id === active?.id
       ? { ...note, ...patch, updatedAt: Date.now() }
       : note))
-  }, [active?.id])
+    scheduleSave()
+  }, [active?.id, scheduleSave])
 
   const extensions = useMemo(() => createEditorExtensions(active?.filePath), [active?.filePath])
   const editor = useEditor({
@@ -278,6 +366,8 @@ function App() {
     setNotes((current) => [...current, note])
     setActiveId(note.id)
     setSourceMode(false)
+    lastSavedRef.current = note.markdown
+    void clearNativeDraft()
   }
 
   function acceptOpenedDocument(opened: OpenedDocument) {
@@ -449,6 +539,8 @@ function App() {
         return next
       })
       setMessage(saveAs ? '副本已保存' : '文件已保存')
+      lastSavedRef.current = active.markdown
+      void clearNativeDraft()
     } catch (error) {
       setMessage(`保存失败：${String(error)}`)
     }

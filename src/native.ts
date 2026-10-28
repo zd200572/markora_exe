@@ -20,6 +20,12 @@ export interface Workspace {
   files: WorkspaceFile[]
 }
 
+export interface DraftData {
+  content: string
+  path: string | null
+  ts: number
+}
+
 export function isDesktop(): boolean {
   if (isTauri()) return true
   if (typeof window !== 'undefined') {
@@ -43,8 +49,57 @@ export async function startWindowDrag() {
 }
 
 export async function quitNativeApp() {
+  const pywebview = (window as any).pywebview
+  if (pywebview?.api?.quit) {
+    await pywebview.api.quit()
+    return
+  }
   if (!isTauri()) return
   await getCurrentWindow().destroy()
+}
+
+export async function saveNativeDraft(draft: DraftData): Promise<boolean> {
+  const pywebview = (window as any).pywebview
+  if (pywebview?.api?.save_draft) {
+    try {
+      return Boolean(await pywebview.api.save_draft(draft))
+    } catch (e) {
+      console.error('save_draft failed', e)
+    }
+  }
+  return false
+}
+
+export async function loadNativeDraft(): Promise<DraftData | null> {
+  await whenPyWebViewReady()
+  const pywebview = (window as any).pywebview
+  if (pywebview?.api?.load_draft) {
+    try {
+      const data = await pywebview.api.load_draft()
+      if (data && typeof data === 'object' && typeof data.content === 'string') {
+        return {
+          content: data.content,
+          path: typeof data.path === 'string' ? data.path : null,
+          ts: typeof data.ts === 'number' ? data.ts : Date.now(),
+        }
+      }
+    } catch (e) {
+      console.error('load_draft failed', e)
+    }
+  }
+  return null
+}
+
+export async function clearNativeDraft(): Promise<boolean> {
+  const pywebview = (window as any).pywebview
+  if (pywebview?.api?.clear_draft) {
+    try {
+      return Boolean(await pywebview.api.clear_draft())
+    } catch (e) {
+      console.error('clear_draft failed', e)
+    }
+  }
+  return false
 }
 
 export async function openNativeDocument(): Promise<OpenedDocument | null> {
@@ -128,7 +183,7 @@ function whenPyWebViewReady(timeoutMs = 5000): Promise<boolean> {
   return new Promise((resolve) => {
     const check = () => {
       const w = window as any
-      return Boolean(w.pywebview?.api?.take_startup_document)
+      return Boolean(w.pywebview?.api)
     }
     if (check()) {
       resolve(true)
