@@ -299,10 +299,18 @@ class DesktopAPI:
 
 
 def main() -> int:
-    if "--disable-gpu" in sys.argv:
-        current_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
-        if "--disable-gpu" not in current_args:
-            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (current_args + " --disable-gpu").strip()
+    current_args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+    fast_flags = [
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-features=msSmartScreenProtection",
+    ]
+    for flag in fast_flags:
+        if flag not in current_args:
+            current_args = (current_args + " " + flag).strip()
+    if "--disable-gpu" in sys.argv and "--disable-gpu" not in current_args:
+        current_args = (current_args + " --disable-gpu").strip()
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = current_args
 
     target_file = startup_document_path(sys.argv[1:])
 
