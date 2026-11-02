@@ -1,5 +1,6 @@
 import { Component, type ReactNode } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
+import { encodeHtmlEntities, generateHTML } from '@tiptap/core'
 import {
   Bold, Braces, Code2, Code, Eye, FilePlus2, Files,
   FileText, Focus, FolderOpen, FolderTree, Heading1, Heading2, Heading3, Import, Info, Italic, Link, List,
@@ -9,7 +10,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildFileTree, classifyExternalChange, createNote, displayDate, flattenTree, getOutline, getWordCount, isFileDirty, noteFromFile, titleFromPath, type Note, WELCOME_NOTE } from './model'
 import { clearNativeDraft, exportHtmlFile, isDesktop, loadNativeDraft, onMenuAction, onNativeCloseRequested, onNativeDocumentOpened, onToast, openNativeDocument, openNativeWorkspace, openExportInBrowser, quitNativeApp, readExternalDocument, readNativeWorkspaceDocument, refreshNativeWorkspace, revealNativeDocument, saveNativeDocument, saveNativeDraft, startWindowDrag, syncThemeMenu, takeStartupDocuments, type OpenedDocument, type Workspace } from './native'
-import { createEditorExtensions, getEditorOutline, isEditorUsable } from './editor'
+import { commitMarkdownSourceEdit, createEditorExtensions, getEditorOutline, isEditorUsable } from './editor'
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state: { error: Error | null } = { error: null }
@@ -91,6 +92,7 @@ function App() {
     let content = activeRef.current?.markdown ?? ''
     if (!sourceModeRef.current && isEditorUsable(editorRef.current)) {
       try {
+        commitMarkdownSourceEdit(editorRef.current)
         content = editorRef.current.getMarkdown()
       } catch {}
     }
@@ -232,6 +234,7 @@ function App() {
     extensions,
     content: active?.markdown ?? '',
     contentType: 'markdown',
+    enablePasteRules: false,
     editorProps: {
       attributes: { class: 'rich-editor', spellcheck: 'true' },
       handleKeyDown: (_view, event) => {
@@ -248,7 +251,7 @@ function App() {
     },
     onCreate: ({ editor }) => setRichOutline(getEditorOutline(editor)),
     onUpdate: ({ editor }) => {
-      if (!editor.isEditable) return
+      if (!editor.isEditable || sourceModeRef.current) return
       setRichOutline(getEditorOutline(editor))
       updateActive({ markdown: editor.getMarkdown() })
     },
@@ -267,7 +270,9 @@ function App() {
   }, [notes, activeId])
 
   useEffect(() => {
-    if (!isEditorUsable(editor) || !active || sourceMode) return
+    if (!isEditorUsable(editor)) return
+    editor.setEditable(!sourceMode, false)
+    if (!active || sourceMode) return
     if (editor.getMarkdown() !== active.markdown) {
       editor.commands.setContent(active.markdown, { contentType: 'markdown', emitUpdate: false })
       setRichOutline(getEditorOutline(editor))
@@ -448,7 +453,7 @@ function App() {
 
   function downloadNote() {
     if (!active) return
-    const blob = new Blob([active.markdown], { type: 'text/markdown;charset=utf-8' })
+    const blob = new Blob([currentMarkdown()], { type: 'text/markdown;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -506,6 +511,22 @@ function App() {
     }
   }
 
+  function currentMarkdown() {
+    const instance = editorRef.current
+    if (!sourceMode && isEditorUsable(instance)) {
+      try {
+        commitMarkdownSourceEdit(instance)
+        return instance.getMarkdown()
+      } catch {}
+    }
+    return active?.markdown ?? ''
+  }
+
+  function toggleSourceMode() {
+    if (!sourceMode) currentMarkdown()
+    setSourceMode((value) => !value)
+  }
+
   async function saveDocument(saveAs = false) {
     if (!active) return
     if (!isDesktop()) {
@@ -517,6 +538,7 @@ function App() {
       if (!window.confirm('磁盘版本在你编辑期间发生了变化，或文件已被移动/删除。继续保存会覆盖或重建它，确定吗？')) return
       force = true
     }
+    const markdown = currentMarkdown()
     try {
       const previousPath = active.filePath
       let path: string | null
@@ -524,7 +546,7 @@ function App() {
         path = await saveNativeDocument(
           saveAs ? undefined : active.filePath,
           active.title,
-          active.markdown,
+          markdown,
           saveAs ? undefined : active.diskMarkdown,
           force,
         )
@@ -532,10 +554,10 @@ function App() {
         if (saveAs || !active.filePath || !String(error).includes('EXTERNAL_DOCUMENT_CHANGED')) throw error
         setExternalConflicts((current) => new Set(current).add(active.filePath!))
         if (!window.confirm('文件刚刚被其他程序修改、移动或删除。仍要用当前内容覆盖或重建它吗？')) return
-        path = await saveNativeDocument(active.filePath, active.title, active.markdown, active.diskMarkdown, true)
+        path = await saveNativeDocument(active.filePath, active.title, markdown, active.diskMarkdown, true)
       }
       if (!path) return
-      updateActive({ filePath: path, title: titleFromPath(path), diskMarkdown: active.markdown })
+      updateActive({ filePath: path, title: titleFromPath(path), diskMarkdown: markdown })
       setExternalConflicts((current) => {
         const next = new Set(current)
         if (previousPath) next.delete(previousPath)
@@ -543,7 +565,7 @@ function App() {
         return next
       })
       setMessage(saveAs ? '副本已保存' : '文件已保存')
-      lastSavedRef.current = active.markdown
+      lastSavedRef.current = markdown
       void clearNativeDraft()
     } catch (error) {
       setMessage(`保存失败：${String(error)}`)
@@ -570,8 +592,8 @@ function App() {
 
   function exportPdf() {
     if (!active) return
-    const html = renderMarkdownToHtml(active.markdown)
-    const document_ = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>${active.title}</title><style>body{max-width:780px;margin:40px auto;padding:0 24px;font-family:"Noto Serif SC",Georgia,serif;font-size:16px;line-height:1.85;color:#333}h1{font-size:2em;border-bottom:1px solid #eee;padding-bottom:.3em}h2{font-size:1.4em;border-bottom:1px solid #eee;padding-bottom:.25em}a{color:#b65b3e}blockquote{border-left:4px solid #b65b3e;padding-left:1.2em;color:#666;font-style:italic}code{background:#f6f6f6;padding:.2em .4em;border-radius:3px;color:#c7254e;font-family:"DM Mono",monospace;font-size:.85em}pre{background:#0d1117;color:#e6edf3;border-radius:6px;padding:16px;overflow:auto}img{max-width:100%}table{border-collapse:collapse}th,td{border:1px solid #ddd;padding:.5em .7em}th{background:#f7f7f7}mark{background:#fffd72;padding:.1em .2em;border-radius:2px}sub,sup{font-size:.75em}
+    const html = renderMarkdownToHtml(currentMarkdown())
+    const document_ = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>${encodeHtmlEntities(active.title)}</title><style>body{max-width:780px;margin:40px auto;padding:0 24px;font-family:"Noto Serif SC",Georgia,serif;font-size:16px;line-height:1.85;color:#333}h1{font-size:2em;border-bottom:1px solid #eee;padding-bottom:.3em}h2{font-size:1.4em;border-bottom:1px solid #eee;padding-bottom:.25em}a{color:#b65b3e}blockquote{border-left:4px solid #b65b3e;padding-left:1.2em;color:#666;font-style:italic}code{background:#f6f6f6;padding:.2em .4em;border-radius:3px;color:#c7254e;font-family:"DM Mono",monospace;font-size:.85em}pre{background:#0d1117;color:#e6edf3;border-radius:6px;padding:16px;overflow:auto}img{max-width:100%}table{border-collapse:collapse}th,td{border:1px solid #ddd;padding:.5em .7em}th{background:#f7f7f7}mark{background:#fffd72;padding:.1em .2em;border-radius:2px}sub,sup{font-size:.75em}
 @media print {
   body { max-width: 100%; margin: 0; padding: 20px; }
   pre { white-space: pre-wrap; word-break: break-all; }
@@ -591,13 +613,13 @@ window.addEventListener('load', function() {
 
   function exportHtml() {
     if (!active) return
-    const html = renderMarkdownToHtml(active.markdown)
+    const html = renderMarkdownToHtml(currentMarkdown())
     const full = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${active.title}</title>
+<title>${encodeHtmlEntities(active.title)}</title>
 <style>
 body { max-width: 780px; margin: 40px auto; padding: 0 24px; font-family: "Noto Serif SC", Georgia, serif; font-size: 17px; line-height: 1.9; color: #333; }
 h1 { font-size: 2.1em; } h2 { font-size: 1.45em; } h3 { font-size: 1.15em; }
@@ -618,39 +640,10 @@ ${html}
   }
 
   function renderMarkdownToHtml(markdown: string): string {
-    let html = markdown
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="language-$1">$2</code></pre>')
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>')
-    html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img alt="$1" src="$2">')
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
-    html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    html = html.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>')
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>')
-    html = html.replace(/~~(.+?)~~/g, '<del>$1</del>')
-    html = html.replace(/==(.+?)==/g, '<mark>$1</mark>')
-    html = html.replace(/~(.+?)~/g, '<sub>$1</sub>')
-    html = html.replace(/\^(.+?)\^/g, '<sup>$1</sup>')
-    html = html.replace(/&lt;u&gt;(.+?)&lt;\/u&gt;/g, '<u>$1</u>')
-    html = html.replace(/^(- \[x\] .+)$/gm, '<li><input type="checkbox" checked disabled> $1</li>')
-    html = html.replace(/^(- \[ \] .+)$/gm, '<li><input type="checkbox" disabled> $1</li>')
-    html = html.replace(/^- (.+)$/gm, '<li>$1</li>')
-    html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
-    html = html.replace(/^---$/gm, '<hr>')
-    const lines = html.split('\n')
-    let inList = false
-    let result: string[] = []
-    for (const line of lines) {
-      const isLi = line.startsWith('<li>')
-      if (isLi && !inList) { result.push('<ul>'); inList = true }
-      if (!isLi && inList) { result.push('</ul>'); inList = false }
-      result.push(line)
-    }
-    if (inList) result.push('</ul>')
-    return result.join('\n').replace(/<li>(- \[x\] |- \[ \] )/g, '<li>')
+    if (!isEditorUsable(editor) || !editor.markdown) return ''
+    return sourceMode
+      ? generateHTML(editor.markdown.parse(markdown), extensions)
+      : editor.getHTML()
   }
 
   function insertTable() {
@@ -920,7 +913,7 @@ ${html}
       }
       if ((event.metaKey || event.ctrlKey) && event.key === '/') {
         event.preventDefault()
-        setSourceMode((value) => !value)
+        toggleSourceMode()
       }
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === 'j') {
         event.preventDefault()
@@ -1124,7 +1117,7 @@ ${html}
       case 'emoji': setEmojiPicker((v) => !v); break
       case 'focus': setFocusMode((v) => !v); break
       case 'typewriter': setTypewriterMode((v) => !v); break
-      case 'source': setSourceMode((v) => !v); break
+      case 'source': toggleSourceMode(); break
       case 'sidebar': setSidebar((v) => !v); break
       case 'outline': setSidebarTab('outline'); setSidebar(true); break
       case 'files': setSidebarTab('files'); setSidebar(true); break
@@ -1308,7 +1301,7 @@ ${html}
                 }}><Palette />切换主题</button>
                 <button onClick={() => { setFocusMode((v) => !v); setMoreMenu(false) }}><Focus />{focusMode ? '退出专注' : '专注模式'}</button>
                 <button onClick={() => { setTypewriterMode((v) => !v); setMoreMenu(false) }}><TextCursorInput />打字机模式</button>
-                <button onClick={() => { setSourceMode((v) => !v); setMoreMenu(false) }}>{sourceMode ? <Eye /> : <Braces />}{sourceMode ? '退出源码' : '源码模式'}</button>
+                <button onClick={() => { toggleSourceMode(); setMoreMenu(false) }}>{sourceMode ? <Eye /> : <Braces />}{sourceMode ? '退出源码' : '源码模式'}</button>
                 <div className="more-separator" />
                 <button onClick={() => void openDocument()}><FolderOpen />打开文件</button>
                 <button onClick={() => void saveDocument()}><Save />保存</button>
@@ -1334,7 +1327,7 @@ ${html}
         <label className="search"><Search /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={sidebarTab === 'files' ? '搜索文稿' : sidebarTab === 'workspace' ? '搜索工作区' : '筛选标题'} />{search && <button onClick={() => setSearch('')}><X /></button>}</label>
         {sidebarTab === 'files' ? <div className="note-list">
           {filteredNotes.map((note) => (
-            <article key={note.id} className={note.id === active.id ? 'selected' : ''} onClick={() => setActiveId(note.id)}>
+            <article key={note.id} className={note.id === active.id ? 'selected' : ''} onClick={() => { currentMarkdown(); setActiveId(note.id) }}>
               <div className="note-heading"><strong>{note.title || '未命名文稿'}</strong><span>{displayDate(note.updatedAt)}</span></div>
               <p>{note.markdown.replace(/[#>*_`~\-[\]()!]/g, '').replace(/\s+/g, ' ').slice(0, 72) || '空文稿'}</p>
               <button title="删除" onClick={(event) => { event.stopPropagation(); removeNote(note.id) }}><Trash2 /></button>
@@ -1373,32 +1366,32 @@ ${html}
         <nav className="toolbar">
           <button title={sidebar ? '收起侧栏' : '展开侧栏'} onClick={() => setSidebar((value) => !value)}>{sidebar ? <PanelLeftClose /> : <PanelLeftOpen />}</button>
           <div className="separator" />
-          <button title="撤销" onClick={() => format('undo')}><Undo2 /></button>
-          <button title="重做" onClick={() => format('redo')}><Redo2 /></button>
+          <button disabled={sourceMode} title="撤销" onClick={() => format('undo')}><Undo2 /></button>
+          <button disabled={sourceMode} title="重做" onClick={() => format('redo')}><Redo2 /></button>
           <div className="separator" />
-          <button title="一级标题" onClick={() => format('formatBlock', 'h1')}><Heading1 /></button>
-          <button title="二级标题" onClick={() => format('formatBlock', 'h2')}><Heading2 /></button>
-          <button title="三级标题" onClick={() => format('formatBlock', 'h3')}><Heading3 /></button>
-          <button title="加粗" onClick={() => format('bold')}><Bold /></button>
-          <button title="斜体" onClick={() => format('italic')}><Italic /></button>
-          <button title="下划线 ⌘U" onClick={() => { if (isEditorUsable(editor)) editor.chain().focus().toggleUnderline().run() }}><Underline /></button>
-          <button title="删除线" onClick={() => format('strikeThrough')}><Strikethrough /></button>
-          <button title="高亮" onClick={toggleHighlight}><Highlighter /></button>
-          <button title="下标" onClick={toggleSubscript}><Subscript /></button>
-          <button title="上标" onClick={toggleSuperscript}><Superscript /></button>
-          <button title="行内代码" onClick={insertInlineCode}><Code /></button>
-          <button title="链接" onClick={addLink}><Link /></button>
+          <button disabled={sourceMode} title="一级标题" onClick={() => format('formatBlock', 'h1')}><Heading1 /></button>
+          <button disabled={sourceMode} title="二级标题" onClick={() => format('formatBlock', 'h2')}><Heading2 /></button>
+          <button disabled={sourceMode} title="三级标题" onClick={() => format('formatBlock', 'h3')}><Heading3 /></button>
+          <button disabled={sourceMode} title="加粗" onClick={() => format('bold')}><Bold /></button>
+          <button disabled={sourceMode} title="斜体" onClick={() => format('italic')}><Italic /></button>
+          <button disabled={sourceMode} title="下划线 ⌘U" onClick={() => { if (isEditorUsable(editor)) editor.chain().focus().toggleUnderline().run() }}><Underline /></button>
+          <button disabled={sourceMode} title="删除线" onClick={() => format('strikeThrough')}><Strikethrough /></button>
+          <button disabled={sourceMode} title="高亮" onClick={toggleHighlight}><Highlighter /></button>
+          <button disabled={sourceMode} title="下标" onClick={toggleSubscript}><Subscript /></button>
+          <button disabled={sourceMode} title="上标" onClick={toggleSuperscript}><Superscript /></button>
+          <button disabled={sourceMode} title="行内代码" onClick={insertInlineCode}><Code /></button>
+          <button disabled={sourceMode} title="链接" onClick={addLink}><Link /></button>
           <div className="separator optional" />
-          <button className="optional" title="无序列表" onClick={() => format('insertUnorderedList')}><List /></button>
-          <button className="optional" title="有序列表" onClick={() => format('insertOrderedList')}><ListOrdered /></button>
-          <button className="optional" title="引用" onClick={() => format('formatBlock', 'blockquote')}><Quote /></button>
-          <button className="optional" title="代码块" onClick={() => format('formatBlock', 'pre')}><Code2 /></button>
-          <button className="optional" title="表格" onClick={insertTable}><Table2 /></button>
-          <button className="optional" title="分隔线" onClick={insertHorizontalRule}><Minus /></button>
-          <button className="optional" title="数学公式" onClick={insertMath}><Sigma /></button>
-          <button className={`optional ${emojiPicker ? 'active' : ''}`} title="表情" onClick={() => setEmojiPicker((v) => !v)}><Smile /></button>
+          <button disabled={sourceMode} className="optional" title="无序列表" onClick={() => format('insertUnorderedList')}><List /></button>
+          <button disabled={sourceMode} className="optional" title="有序列表" onClick={() => format('insertOrderedList')}><ListOrdered /></button>
+          <button disabled={sourceMode} className="optional" title="引用" onClick={() => format('formatBlock', 'blockquote')}><Quote /></button>
+          <button disabled={sourceMode} className="optional" title="代码块" onClick={() => format('formatBlock', 'pre')}><Code2 /></button>
+          <button disabled={sourceMode} className="optional" title="表格" onClick={insertTable}><Table2 /></button>
+          <button disabled={sourceMode} className="optional" title="分隔线" onClick={insertHorizontalRule}><Minus /></button>
+          <button disabled={sourceMode} className="optional" title="数学公式" onClick={insertMath}><Sigma /></button>
+          <button disabled={sourceMode} className={`optional ${emojiPicker ? 'active' : ''}`} title="表情" onClick={() => setEmojiPicker((v) => !v)}><Smile /></button>
           <span className="toolbar-spacer" />
-          <button title="切换 Markdown 源码" onClick={() => setSourceMode((value) => !value)} className={sourceMode ? 'active' : ''}>{sourceMode ? <Eye /> : <Braces />}</button>
+          <button title="切换 Markdown 源码" onClick={toggleSourceMode} className={sourceMode ? 'active' : ''}>{sourceMode ? <Eye /> : <Braces />}</button>
           <button title="打开 Markdown 文件" onClick={() => void openDocument()}><FolderOpen /></button>
           <button title="保存 Markdown 文件" onClick={() => void saveDocument()} className={fileDirty || externalConflict ? 'save-dirty' : ''}><Save /></button>
           <button title="导出 HTML" onClick={exportHtml}><Braces /></button>

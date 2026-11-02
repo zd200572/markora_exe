@@ -13,12 +13,25 @@ import TableHeader from '@tiptap/extension-table-header'
 import TableRow from '@tiptap/extension-table-row'
 import TaskItem from '@tiptap/extension-task-item'
 import TaskList from '@tiptap/extension-task-list'
-import { Extension } from '@tiptap/core'
+import { Extension, markInputRule } from '@tiptap/core'
+import { Fragment, Slice } from '@tiptap/pm/model'
 import { Plugin, TextSelection } from '@tiptap/pm/state'
 import type { Editor } from '@tiptap/core'
 import type { OutlineItem } from './model'
 import { convertFileSrc, isTauri } from '@tauri-apps/api/core'
 import { authorizeNativeImage } from './native'
+import { MarkdownMarkers } from './mark-annotations'
+
+export {
+  beginMarkdownSourceEdit,
+  cancelMarkdownSourceEdit,
+  commitMarkdownSourceEdit,
+  getMarkDecorations,
+  getMarkdownSourceEdit,
+  getVisibleMarkers,
+  removeBoldRange,
+  setMarkdownSourceEditValue,
+} from './mark-annotations'
 
 export function resolveLocalImagePath(documentPath: string | undefined, source: string) {
   if (!documentPath || !source) return null
@@ -51,7 +64,7 @@ export function resolveLocalImagePath(documentPath: string | undefined, source: 
   return prefix === '/' ? `/${normalized.join('/')}` : `${prefix}${prefix ? separator : ''}${normalized.join(separator)}`
 }
 
-const PAIRS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '`': '`', '*': '*', '~': '~', '"': '"', "'": "'", '$': '$' }
+const PAIRS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'" }
 
 const AutoPair = Extension.create({
   name: 'autoPair',
@@ -62,15 +75,17 @@ const AutoPair = Extension.create({
           handleTextInput(view, from, to, text) {
             const { state, dispatch } = view
             const closing = PAIRS[text]
-            if (!closing) return false
+            if (!closing || view.composing) return false
+            const $from = state.doc.resolve(from)
+            const $to = state.doc.resolve(to)
+            if (!$from.sameParent($to)) return false
+            const before = $from.parent.textBetween(Math.max(0, $from.parentOffset - 1), $from.parentOffset)
+            if (before === '\\' || ((text === "'" || text === '"') && /[\p{L}\p{N}]/u.test(before))) return false
             if (from !== to) {
-              const selectedText = state.doc.textBetween(from, to, '\n')
-              if (selectedText) {
-                const tr = state.tr.replaceWith(from, to, state.schema.text(text + selectedText + closing))
-                tr.setSelection(TextSelection.create(tr.doc, from + 1, from + 1 + selectedText.length))
-                dispatch(tr)
-                return true
-              }
+              const tr = state.tr.insertText(closing, to).insertText(text, from)
+              tr.setSelection(TextSelection.create(tr.doc, from + 1, to + 1))
+              dispatch(tr)
+              return true
             }
             const tr = state.tr.insertText(text + closing, from)
             tr.setSelection(TextSelection.create(tr.doc, from + 1, from + 1))
@@ -80,15 +95,15 @@ const AutoPair = Extension.create({
           handleKeyDown(view, event) {
             const { state, dispatch } = view
             const closing = event.key
-            const openFor: Record<string, string> = { ')': '(', ']': '[', '}': '{', '`': '`', '*': '*', '~': '~', '$': '$' }
+            const openFor: Record<string, string> = { ')': '(', ']': '[', '}': '{', '"': '"', "'": "'" }
             const open = openFor[closing]
             if (open && !event.metaKey && !event.ctrlKey) {
               const { from } = state.selection
               if (from === state.selection.to) {
-                const before = state.doc.textBetween(from - 1, from, '\n')
-                if (before === open) {
-                  const tr = state.tr.delete(from, from + 1)
-                  tr.setSelection(TextSelection.create(tr.doc, from, from))
+                const $from = state.selection.$from
+                const after = $from.parent.textBetween($from.parentOffset, Math.min($from.parent.content.size, $from.parentOffset + 1))
+                if (after === closing) {
+                  const tr = state.tr.setSelection(TextSelection.create(state.doc, from + 1))
                   dispatch(tr)
                   return true
                 }
@@ -96,7 +111,8 @@ const AutoPair = Extension.create({
             }
             if (event.key === 'Backspace') {
               const { from } = state.selection
-              if (from === state.selection.to && from > 0) {
+              const $from = state.selection.$from
+              if (from === state.selection.to && $from.parentOffset > 0 && $from.parentOffset < $from.parent.content.size) {
                 const before = state.doc.textBetween(from - 1, from, '\n')
                 const after = state.doc.textBetween(from, from + 1, '\n')
                 if (PAIRS[before] === after && before) {
@@ -111,6 +127,42 @@ const AutoPair = Extension.create({
         },
       }),
     ]
+  },
+})
+
+const MarkdownEditing = Extension.create({
+  name: 'markdownEditing',
+  priority: 1100,
+  addInputRules() {
+    const tokens: Record<string, string> = { bold: 'strong', italic: 'em', strike: 'del', code: 'codespan', highlight: 'highlight' }
+    return Object.entries(tokens).map(([name, tokenType]) => markInputRule({
+      type: this.editor.schema.marks[name],
+      find: (text) => {
+        if (!/[*_~`=]$/.test(text)) return null
+        const manager = this.editor.markdown!
+        const token = new manager.instance.Lexer(manager.instance.defaults).inlineTokens(text).at(-1)
+        if (!token || token.type !== tokenType || !('text' in token) || !token.text || !token.raw.includes(token.text)) return null
+        const index = text.length - token.raw.length
+        if (text[index - 1] === token.raw[0]) return null
+        return { index, text: token.raw, replaceWith: token.text }
+      },
+    }))
+  },
+  addProseMirrorPlugins() {
+    return [new Plugin({
+      props: {
+        clipboardTextParser: (text, $context, plainText) => {
+          if (plainText) {
+            const content = text.split(/\r\n?|\n/).map((line) => this.editor.schema.nodes.paragraph.create(
+              null, line ? this.editor.schema.text(line, $context.marks()) : null,
+            ))
+            return Slice.maxOpen(Fragment.fromArray(content))
+          }
+          const doc = this.editor.schema.nodeFromJSON(this.editor.markdown!.parse(text))
+          return Slice.maxOpen(doc.content)
+        },
+      },
+    })]
   },
 })
 
@@ -175,6 +227,8 @@ export function createEditorExtensions(documentPath?: string) {
     Subscript,
     Superscript,
     AutoPair,
+    MarkdownEditing,
+    MarkdownMarkers,
   ]
 }
 

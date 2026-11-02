@@ -1,4 +1,4 @@
-import { Editor } from '@tiptap/core'
+import { Editor, getExtensionField, type InputRule } from '@tiptap/core'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createEditorExtensions, getEditorOutline, isEditorUsable, resolveLocalImagePath } from './editor'
 
@@ -7,6 +7,63 @@ let editor: Editor | undefined
 afterEach(() => editor?.destroy())
 
 describe('Markdown editor model', () => {
+  it.each([
+    ['**X**', 'bold'],
+    ['正文**X**', 'bold'],
+    ['text**X**', 'bold'],
+    ['__X__', 'bold'],
+    ['正文*X*', 'italic'],
+    ['正文~~X~~', 'strike'],
+    ['正文' + String.fromCharCode(96) + 'X' + String.fromCharCode(96), 'code'],
+    ['正文==X==', 'highlight'],
+  ])('recognizes completed inline Markdown in %s', (text, mark) => {
+    editor = new Editor({ extensions: createEditorExtensions(), content: 'placeholder', contentType: 'markdown' })
+    const extension = editor.extensionManager.extensions.find((item) => item.name === 'markdownEditing')!
+    const rules = getExtensionField<() => InputRule[]>(extension, 'addInputRules', { editor })()
+    const matches = rules.map((rule) => typeof rule.find === 'function' ? rule.find(text) : null).filter(Boolean)
+    expect(matches).toHaveLength(1)
+    expect(matches[0]?.replaceWith).toBe('X')
+    expect(editor.markdown!.parse(matches[0]!.text).content?.[0].content?.[0].marks).toContainEqual({ type: mark })
+  })
+
+  it.each(['**X*', '__X_', '\\**X**', '\\*X*', 'snake_case_value'])('does not format incomplete or escaped input %s', (text) => {
+    editor = new Editor({ extensions: createEditorExtensions(), content: 'placeholder', contentType: 'markdown' })
+    const extension = editor.extensionManager.extensions.find((item) => item.name === 'markdownEditing')!
+    const rules = getExtensionField<() => InputRule[]>(extension, 'addInputRules', { editor })()
+    expect(rules.some((rule) => typeof rule.find === 'function' && rule.find(text))).toBe(false)
+  })
+
+  it('uses the document Markdown parser for pasted headings, adjacent Chinese marks and lists', () => {
+    editor = new Editor({ extensions: createEditorExtensions(), content: 'placeholder', contentType: 'markdown' })
+    const extension = editor.extensionManager.extensions.find((item) => item.name === 'markdownEditing')!
+    const [plugin] = getExtensionField(extension, 'addProseMirrorPlugins', { editor })()
+    const slice = plugin.props.clipboardTextParser('# Heading\n\n正文**X**\n\n- first\n- second', editor.state.doc.resolve(1), false)
+    const content = slice.content.toJSON()
+    expect(content.map((node: { type: string }) => node.type)).toEqual(['heading', 'paragraph', 'bulletList'])
+    expect(content[1].content[1].marks).toEqual([{ type: 'bold' }])
+  })
+
+  it('preserves explicit literal formatting characters, Windows paths and code when pasting', () => {
+    const literal = '**literal**'.replaceAll('*', String.fromCharCode(92) + '*')
+    const tick = String.fromCharCode(96)
+    const markdown = literal + '\n\n' + tick + 'C:\\notes\\x **code**' + tick
+    editor = new Editor({ extensions: createEditorExtensions(), content: 'placeholder', contentType: 'markdown' })
+    const extension = editor.extensionManager.extensions.find((item) => item.name === 'markdownEditing')!
+    const [plugin] = getExtensionField(extension, 'addProseMirrorPlugins', { editor })()
+    const slice = plugin.props.clipboardTextParser(markdown, editor.state.doc.resolve(1), false)
+    const content = slice.content.toJSON()
+    expect(content[0].content).toEqual([{ type: 'text', text: '**literal**' }])
+    expect(content[1].content).toEqual([{ type: 'text', text: 'C:\\notes\\x **code**', marks: [{ type: 'code' }] }])
+  })
+
+  it('keeps explicit paste-as-plain-text literal', () => {
+    editor = new Editor({ extensions: createEditorExtensions(), content: 'placeholder', contentType: 'markdown' })
+    const extension = editor.extensionManager.extensions.find((item) => item.name === 'markdownEditing')!
+    const [plugin] = getExtensionField(extension, 'addProseMirrorPlugins', { editor })()
+    const slice = plugin.props.clipboardTextParser('**literal**', editor.state.doc.resolve(1), true)
+    expect(slice.content.toJSON()[0].content).toEqual([{ type: 'text', text: '**literal**' }])
+  })
+
   it('rejects an editor instance after Tiptap has destroyed it during document switching', () => {
     expect(isEditorUsable({ isDestroyed: false } as Editor)).toBe(true)
     editor = new Editor({ extensions: createEditorExtensions(), content: 'old document', contentType: 'markdown' })
